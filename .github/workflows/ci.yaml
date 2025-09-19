@@ -154,28 +154,37 @@ jobs:
       - name: Install Trivy
         uses: aquasecurity/trivy-action@0.24.0
 
-      - name: Trivy scan (table in logs)
-        continue-on-error: true
-        run: |
-          trivy image --timeout 5m --scanners vuln \
-            --severity CRITICAL,HIGH \
-            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }} \
-            || true
+      - name: Trivy image scan (table, blocking)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+            scan-type: image
+            image-ref: docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
+            vuln-type: os,library
+            severity: HIGH,CRITICAL
+            ignore-unfixed: false
+            format: table
+            timeout: 10m
+            exit-code: '1'   # fail CI if HIGH/CRITICAL found
 
-      - name: Trivy SARIF (for Code Scanning)
+        # Produce SARIF for Code Scanning
+      - name: Trivy image scan (SARIF)
+        uses: aquasecurity/trivy-action@0.24.0
         continue-on-error: true
-        run: |
-          trivy image --timeout 5m --scanners vuln \
-            --severity CRITICAL,HIGH --format sarif \
-            -o trivy-results.sarif \
-            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }} \
-            || true
+        with:
+            scan-type: image
+            image-ref: docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
+            vuln-type: os,library
+            severity: HIGH,CRITICAL
+            ignore-unfixed: false
+            format: sarif
+            output: trivy-results.sarif
+            timeout: 10m
 
       - name: Upload Trivy SARIF to Code Scanning
-        if: always()
+        if: always() && hashFiles('trivy-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: trivy-results.sarif
+            sarif_file: trivy-results.sarif
 
       - name: Upload Trivy report as artifact
         if: always()
