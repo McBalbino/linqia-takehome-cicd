@@ -13,9 +13,9 @@ permissions:
   security-events: write
 
 jobs:
-  # ----------------------------
+  # ---------------------------
   # 1) Lint & Test
-  # ----------------------------
+  # ---------------------------
   test-matrix:
     name: Lint & Test
     runs-on: ubuntu-latest
