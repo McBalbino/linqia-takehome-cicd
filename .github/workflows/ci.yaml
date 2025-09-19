@@ -1,0 +1,219 @@
+name: Python-Task (CI)
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+  security-events: write
+
+jobs:
+  # ----------------------------
+  # 1) Lint & Test
+  # ----------------------------
+  test-matrix:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pytest pytest-cov
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Lint (flake8)
+        run: |
+          # Block on syntax errors / undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Style pass (non-blocking)
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Run tests
+        run: pytest -q
+
+  # ----------------------------
+  # 2) Coverage 
+  # ----------------------------
+  coverage:
+    name: Tests + Coverage (3.12) with artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      cov_pct: ${{ steps.cov.outputs.pct }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run tests with coverage + JUnit
+        run: |
+          pytest -q --maxfail=1 --disable-warnings \
+            --junitxml=test-results.xml \
+            --cov=sample_app --cov-report=xml --cov-report=term
+
+      - name: Parse coverage %
+        id: cov
+        run: |
+          RATE=$(python - <<'PY'
+            import xml.etree.ElementTree as ET
+            t = ET.parse('coverage.xml')
+            print(round(float(t.getroot().attrib.get('line-rate', 0.0))*100, 2))
+            PY
+            )
+          echo "pct=$RATE" >> "$GITHUB_OUTPUT"
+          echo "Coverage: ${RATE}%"
+
+      - name: Enforce coverage threshold (80%)
+        run: |
+          thresh=80
+          pct=${{ steps.cov.outputs.pct }}
+          awk -v p="$pct" -v t="$thresh" 'BEGIN{exit !(p+0 >= t+0)}' || {
+            echo "Coverage ${pct}% below threshold ${thresh}%"
+            exit 1
+          }
+
+      - name: Upload test & coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-and-coverage-3.12
+          path: |
+            test-results.xml
+            coverage.xml
+
+  # ----------------------------
+  # 3) Build & Push + Security
+  # ----------------------------
+  docker:
+    name: Build & Push Image + Security Scan
+    runs-on: ubuntu-latest
+    needs: [test-matrix, coverage]
+    if: ${{ needs.test-matrix.result == 'success' && needs.coverage.result == 'success' }}
+    env:
+      DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+      BRANCH_TAG: ${{ github.ref_name }}
+      SHA_TAG: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Derive repo name for Docker Hub
+        id: repo
+        run: |
+          REPO="${GITHUB_REPOSITORY#*/}"
+          echo "name=${REPO}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push (with GHA cache)
+        id: buildpush
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.BRANCH_TAG }}
+            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+
+      - name: Trivy scan (table in logs)
+        continue-on-error: true
+        run: |
+          trivy image --timeout 5m --scanners vuln \
+            --severity CRITICAL,HIGH \
+            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }} \
+            || true
+
+      - name: Trivy SARIF (for Code Scanning)
+        continue-on-error: true
+        run: |
+          trivy image --timeout 5m --scanners vuln \
+            --severity CRITICAL,HIGH --format sarif \
+            -o trivy-results.sarif \
+            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }} \
+            || true
+
+      - name: Upload Trivy SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Upload Trivy report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan
+          path: trivy-results.sarif
+          if-no-files-found: ignore
+
+      - name: Comment on PR with CI summary
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const cov = "${{ needs.coverage.outputs.cov_pct }}";
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const repoName = "${{ steps.repo.outputs.name }}";
+            const user = "${{ env.DOCKERHUB_USER }}";
+            const branch = "${{ env.BRANCH_TAG }}";
+            const imgBranch = `docker.io/${user}/${repoName}:${branch}`;
+            const imgSha = `docker.io/${user}/${repoName}:${context.sha}`;
+
+            const body = [
+              "**CI Results**",
+              `- ✅ Lint & tests passed on Python 3.10, 3.11, 3.12`,
+              `- 📊 Coverage (3.12, enforced ≥80%): \`${cov}%\``,
+              `- 🐳 Images pushed:`,
+              `  - \`${imgBranch}\``,
+              `  - \`${imgSha}\``,
+              `- 🛡️ Trivy security scan uploaded (Code Scanning + artifact)`,
+              `- 📎 Artifacts: see this run → Artifacts`,
+              `- 🔗 Run details: ${runUrl}`
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
