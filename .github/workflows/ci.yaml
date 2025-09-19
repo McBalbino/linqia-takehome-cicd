@@ -85,8 +85,9 @@ jobs:
             import xml.etree.ElementTree as ET
             t = ET.parse('coverage.xml')
             print(round(float(t.getroot().attrib.get('line-rate', 0.0))*100, 2))
-            PY
             )
+            PY
+            
           echo "pct=$RATE" >> "$GITHUB_OUTPUT"
           echo "Coverage: ${RATE}%"
 
