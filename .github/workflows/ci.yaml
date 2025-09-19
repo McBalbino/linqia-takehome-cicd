@@ -31,6 +31,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
@@ -40,9 +42,7 @@ jobs:
 
       - name: Lint (flake8)
         run: |
-          # Block on syntax errors / undefined names
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-          # Style pass (non-blocking)
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Run tests
@@ -52,7 +52,7 @@ jobs:
   # 2) Coverage 
   # ----------------------------
   coverage:
-    name: Tests + Coverage (3.12) with artifacts
+    name: Tests + Coverage (3.12)
     runs-on: ubuntu-latest
     outputs:
       cov_pct: ${{ steps.cov.outputs.pct }}
@@ -64,7 +64,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install test deps
         run: |
@@ -80,15 +81,11 @@ jobs:
 
       - name: Parse coverage %
         id: cov
+        shell: bash
         run: |
-            RATE=$(python - <<'PY'
-            import xml.etree.ElementTree as ET
-            t = ET.parse('coverage.xml')
-            print(round(float(t.getroot().attrib.get('line-rate', 0.0))*100, 2))
-            PY
-            )
-            echo "pct=${RATE}" >> "$GITHUB_OUTPUT"
-            echo "Coverage: ${RATE}%"
+          RATE=$(python -c "import xml.etree.ElementTree as ET; t=ET.parse('coverage.xml'); print(round(float(t.getroot().attrib.get('line-rate',0.0))*100,2))")
+          echo "pct=${RATE}" >> "$GITHUB_OUTPUT"
+          echo "Coverage: ${RATE}%"
 
       - name: Enforce coverage threshold (80%)
         run: |
@@ -121,103 +118,103 @@ jobs:
       SHA_TAG: ${{ github.sha }}
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Derive repo name for Docker Hub
-      id: repo
-      run: |
-        REPO="${GITHUB_REPOSITORY#*/}"
-        echo "name=${REPO}" >> "$GITHUB_OUTPUT"
+      - name: Derive repo name for Docker Hub
+        id: repo
+        run: |
+          REPO="${GITHUB_REPOSITORY#*/}"
+          echo "name=${REPO}" >> "$GITHUB_OUTPUT"
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Build & Push (with GHA cache)
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        platforms: linux/amd64
-        push: true
-        tags: |
-          docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.BRANCH_TAG }}
-          docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+      - name: Build & Push (with GHA cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.BRANCH_TAG }}
+            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-    # --- Security scans ---
-    - name: Trivy image scan (SARIF)
-      uses: aquasecurity/trivy-action@0.24.0
-      continue-on-error: true
-      with:
-        scan-type: image
-        image-ref: docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
-        vuln-type: os,library
-        severity: HIGH,CRITICAL
-        ignore-unfixed: false
-        format: sarif
-        output: trivy-results.sarif
-        timeout: 10m
+      # --- Security scans ---
+      - name: Trivy image scan (SARIF)
+        uses: aquasecurity/trivy-action@0.24.0
+        continue-on-error: true
+        with:
+          scan-type: image
+          image-ref: docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          format: sarif
+          output: trivy-results.sarif
+          timeout: 10m
 
-    - name: Upload Trivy SARIF to Code Scanning
-      if: always() && hashFiles('trivy-results.sarif') != ''
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: trivy-results.sarif
+      - name: Upload Trivy SARIF to Code Scanning
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
 
-    - name: Upload Trivy report as artifact
-      if: always() && hashFiles('trivy-results.sarif') != ''
-      uses: actions/upload-artifact@v4
-      with:
-        name: trivy-scan
-        path: trivy-results.sarif
-        if-no-files-found: ignore
+      - name: Upload Trivy report as artifact
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan
+          path: trivy-results.sarif
+          if-no-files-found: ignore
 
-    - name: Trivy image scan (table, blocking)
-      uses: aquasecurity/trivy-action@0.24.0
-      with:
-        scan-type: image
-        image-ref: docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
-        vuln-type: os,library
-        severity: HIGH,CRITICAL
-        ignore-unfixed: false
-        format: table
-        timeout: 10m
-        exit-code: '1'
+      - name: Trivy image scan (table, blocking)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: image
+          image-ref: docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          format: table
+          timeout: 10m
+          exit-code: '1'
 
-    - name: Comment on PR with CI summary
-      if: ${{ github.event_name == 'pull_request' }}
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const cov = "${{ needs.coverage.outputs.cov_pct }}";
-          const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-          const repoName = "${{ steps.repo.outputs.name }}";
-          const user = "${{ env.DOCKERHUB_USER }}";
-          const branch = "${{ env.BRANCH_TAG }}";
-          const imgBranch = `docker.io/${user}/${repoName}:${branch}`;
-          const imgSha = `docker.io/${user}/${repoName}:${context.sha}`;
+      - name: Comment on PR with CI summary
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const cov = "${{ needs.coverage.outputs.cov_pct }}";
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const repoName = "${{ steps.repo.outputs.name }}";
+            const user = "${{ env.DOCKERHUB_USER }}";
+            const branch = "${{ env.BRANCH_TAG }}";
+            const imgBranch = `docker.io/${user}/${repoName}:${branch}`;
+            const imgSha = `docker.io/${user}/${repoName}:${context.sha}`;
 
-          const body = [
-            "**CI Results**",
-            `- ✅ Lint & tests passed on Python 3.10, 3.11, 3.12`,
-            `- 📊 Coverage (3.12, enforced ≥80%): \`${cov}%\``,
-            `- 🐳 Images pushed:`,
-            `  - \`${imgBranch}\``,
-            `  - \`${imgSha}\``,
-            `- 🛡️ Trivy security scan: SARIF uploaded; blocking table run enforced`,
-            `- 📎 Artifacts: see this run → Artifacts`,
-            `- 🔗 Run details: ${runUrl}`
-          ].join("\n");
+            const body = [
+              "**CI Results**",
+              `- ✅ Lint & tests passed on Python 3.10, 3.11, 3.12`,
+              `- 📊 Coverage (3.12, enforced ≥80%): \`${cov}%\``,
+              `- 🐳 Images pushed:`,
+              `  - \`${imgBranch}\``,
+              `  - \`${imgSha}\``,
+              `- 🛡️ Trivy security scan: SARIF uploaded; blocking table run enforced`,
+              `- 📎 Artifacts: see this run → Artifacts`,
+              `- 🔗 Run details: ${runUrl}`
+            ].join("\n");
 
-          await github.rest.issues.createComment({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.issue.number,
-            body
-          });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
