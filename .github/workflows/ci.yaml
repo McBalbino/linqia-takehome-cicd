@@ -160,8 +160,7 @@ jobs:
             tags: |
                 docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ steps.tags.outputs.branch_tag }}
                 docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ steps.tags.outputs.sha_tag }}
-                cache-from: type=gha
-                cache-to: type=gha,mode=max
+
 
       - name: Trivy image scan (SARIF)
         uses: aquasecurity/trivy-action@0.24.0
