@@ -1,0 +1,4 @@
+# CI/testing tools (will be installed into the image)
+flake8
+pytest
+pytest-cov
