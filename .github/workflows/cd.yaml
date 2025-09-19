@@ -15,19 +15,21 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     env:
-      DH_USER:    ${{ secrets.DOCKERHUB_USERNAME }}
-      REPO_NAME:  ${{ github.event.repository.name }}
-      BRANCH:     ${{ github.event.workflow_run.head_branch }}
-      SHA:        ${{ github.event.workflow_run.head_sha }}
+      DH_USER:   ${{ secrets.DOCKERHUB_USERNAME }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      BRANCH:    ${{ github.event.workflow_run.head_branch }}
+      SHA:       ${{ github.event.workflow_run.head_sha }}
 
     steps:
+      # 1) Login to Docker Hub
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Pull image (prefer :branch, fallback :sha)
+      # 2) Pull the image (prefer :branch, fallback :sha)
+      - name: Pull image
         id: pull
         shell: bash
         run: |
@@ -51,7 +53,7 @@ jobs:
           fi
 
           echo "status=failure" >> "$GITHUB_OUTPUT"
-          exit 1
+          exit 0  # keep job running so we can post a PR comment
 
       - name: Run container (capture result)
         id: run
@@ -59,28 +61,29 @@ jobs:
         shell: bash
         run: |
           IMAGE="${{ steps.pull.outputs.image }}"
-          echo "Running: ${IMAGE} → python -m sample_app 2 3"
+          echo "Running: ${IMAGE} -> python -m sample_app 2 3 (via ENTRYPOINT+CMD and args)"
           set +e
-          OUT=$(docker run --rm "${IMAGE}" python -m sample_app 2 3)
+          OUT=$(docker run --rm "${IMAGE}" 2 3)
           EC=$?
           set -e
-          echo "out=${OUT}"      >> "$GITHUB_OUTPUT"
-          echo "exit=${EC}"      >> "$GITHUB_OUTPUT"
-          echo "image=${IMAGE}"  >> "$GITHUB_OUTPUT"
+          echo "out=${OUT}"     >> "$GITHUB_OUTPUT"
+          echo "exit=${EC}"     >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Container output: ${OUT}"
+          echo "Exit code: ${EC}"
 
+      # 4) Assert success (will fail the job if mock deploy failed)
       - name: Assert success
         if: ${{ steps.pull.outputs.status == 'success' }}
+        shell: bash
         run: |
           test "${{ steps.run.outputs.exit }}" -eq 0 || { echo "Container exited non-zero"; exit 1; }
           test "${{ steps.run.outputs.out }}" = "5"  || { echo "Expected '5' got '${{ steps.run.outputs.out }}'"; exit 1; }
 
+      # 5) Comment on PR (always, if a PR exists)
       - name: Comment on PR (CD summary)
         if: always()
         uses: actions/github-script@v7
-        env:
-          PULLED_IMAGE: ${{ steps.run.outputs.image || format('docker.io/{0}/{1}:{2}', env.DH_USER, env.REPO_NAME, env.BRANCH) }}
-          OUT:          ${{ steps.run.outputs.out }}
-          EXIT:         ${{ steps.run.outputs.exit }}
         with:
           script: |
             const owner = context.repo.owner;
@@ -92,21 +95,23 @@ jobs:
             const pr = prs.data[0]?.number;
             if (!pr) { core.info("No PR found for this commit; skipping comment."); return; }
 
-            const pulled = "${{ steps.pull.outputs.status }}" === "success";
-            const img    = process.env.PULLED_IMAGE;
-            const out    = process.env.OUT ?? "";
-            const exit   = process.env.EXIT ?? "";
-            const ok     = pulled && exit === "0" && out === "5";
-            const emoji  = ok ? "✅" : "❌";
+            const pulled   = "${{ steps.pull.outputs.status }}" === "success";
+            const image    = "${{ steps.pull.outputs.image || '' }}";
+            const out      = "${{ steps.run.outputs.out || '' }}";
+            const exitCode = "${{ steps.run.outputs.exit || '' }}";
+            const ok = pulled && exitCode === "0" && out === "5";
+            const emoji = ok ? "✅" : "❌";
 
             const lines = [
               `**CD Result** ${emoji}`,
-              `- Image: \`${img}\``,
+              `- Image: \`${image || `docker.io/${process.env.DH_USER}/${process.env.REPO_NAME}:${process.env.BRANCH}`}\``,
               `- Pulled: \`${pulled ? "yes" : "no"}\``,
               `- Command: \`python -m sample_app 2 3\``,
               `- Output: \`${out || "(n/a)"}\``,
-              `- Exit code: \`${exit || "(n/a)"}\``,
+              `- Exit code: \`${exitCode || "(n/a)"}\``,
               `- Status: \`${ok ? "success" : "failure"}\``,
             ];
 
-            await github.rest.issues.createComment({ owner, repo, issue_number: pr, body: lines.join("\n") });
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: pr, body: lines.join("\n")
+            });
