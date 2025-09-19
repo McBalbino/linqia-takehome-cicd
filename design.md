@@ -225,7 +225,6 @@ docker run --rm <user>/<repo>:dev 2 3   # should print 5
 - Deploy to a real environment (e.g., ephemeral container or k8s job).
 
 ---
----
 
 ## 15) Acceptance Checklist
 
@@ -237,3 +236,5 @@ docker run --rm <user>/<repo>:dev 2 3   # should print 5
 - [ ] CI posts a PR comment with results and image links.
 - [ ] CD triggers only after successful CI, pulls same image, runs app, and comments status.
 - [ ] `design.md`, `Dockerfile`, `ci.yml`, `cd.yml` present in repo.
+
+---
