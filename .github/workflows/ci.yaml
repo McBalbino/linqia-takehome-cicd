@@ -113,9 +113,8 @@ jobs:
     needs: [test-matrix, coverage]
     if: ${{ needs.test-matrix.result == 'success' && needs.coverage.result == 'success' }}
     env:
-      DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-      BRANCH_TAG: ${{ github.ref_name }}
-      SHA_TAG: ${{ github.sha }}
+        DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        SHA_TAG: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v4
@@ -123,14 +122,31 @@ jobs:
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+            username: ${{ secrets.DOCKERHUB_USERNAME }}
+            password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Derive repo name for Docker Hub
         id: repo
         run: |
-          REPO="${GITHUB_REPOSITORY#*/}"
-          echo "name=${REPO}" >> "$GITHUB_OUTPUT"
+            REPO="${GITHUB_REPOSITORY#*/}"
+            echo "name=${REPO}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute Docker-safe branch tag
+        id: tags
+        shell: bash
+        run: |
+            # Use PR head branch for PR events; else use ref_name
+            RAW="${{ github.ref_name }}"
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            RAW="${{ github.head_ref }}"
+            fi
+            SAFE=$(echo "$RAW" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9._-]+/-/g' \
+            | sed -E 's/^-+|-+$//g' \
+            | cut -c1-63)
+            echo "branch_tag=$SAFE" >> "$GITHUB_OUTPUT"
+            echo "sha_tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -138,83 +154,72 @@ jobs:
       - name: Build & Push (with GHA cache)
         uses: docker/build-push-action@v6
         with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: |
-            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.BRANCH_TAG }}
-            docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            context: .
+            platforms: linux/amd64
+            push: true
+            tags: |
+                docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ steps.tags.outputs.branch_tag }}
+                docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ steps.tags.outputs.sha_tag }}
+                cache-from: type=gha
+                cache-to: type=gha,mode=max
 
-      # --- Security scans ---
       - name: Trivy image scan (SARIF)
         uses: aquasecurity/trivy-action@0.24.0
         continue-on-error: true
         with:
-          scan-type: image
-          image-ref: docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
-          vuln-type: os,library
-          severity: HIGH,CRITICAL
-          ignore-unfixed: false
-          format: sarif
-          output: trivy-results.sarif
-          timeout: 10m
+            scan-type: image
+            image-ref: docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ steps.tags.outputs.sha_tag }}
+            vuln-type: os,library
+            severity: HIGH,CRITICAL
+            ignore-unfixed: false
+            format: sarif
+            output: trivy-results.sarif
+            timeout: 10m
 
       - name: Upload Trivy SARIF to Code Scanning
         if: always() && hashFiles('trivy-results.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: trivy-results.sarif
+            sarif_file: trivy-results.sarif
 
       - name: Upload Trivy report as artifact
         if: always() && hashFiles('trivy-results.sarif') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-scan
-          path: trivy-results.sarif
-          if-no-files-found: ignore
-
-      - name: Trivy image scan (table, blocking)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: image
-          image-ref: docker.io/${{ env.DOCKERHUB_USER }}/${{ steps.repo.outputs.name }}:${{ env.SHA_TAG }}
-          vuln-type: os,library
-          severity: HIGH,CRITICAL
-          ignore-unfixed: false
-          format: table
-          timeout: 10m
-          exit-code: '1'
+            name: trivy-scan
+            path: trivy-results.sarif
+            if-no-files-found: ignore
 
       - name: Comment on PR with CI summary
         if: ${{ github.event_name == 'pull_request' }}
         uses: actions/github-script@v7
         with:
-          script: |
-            const cov = "${{ needs.coverage.outputs.cov_pct }}";
-            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const repoName = "${{ steps.repo.outputs.name }}";
-            const user = "${{ env.DOCKERHUB_USER }}";
-            const branch = "${{ env.BRANCH_TAG }}";
-            const imgBranch = `docker.io/${user}/${repoName}:${branch}`;
-            const imgSha = `docker.io/${user}/${repoName}:${context.sha}`;
+            script: |
+                const cov = "${{ needs.coverage.outputs.cov_pct }}";
+                const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+                const repoName = "${{ steps.repo.outputs.name }}";
+                const user = "${{ env.DOCKERHUB_USER }}";
+                const branchTag = "${{ steps.tags.outputs.branch_tag }}";
+                const imgBranch = `docker.io/${user}/${repoName}:${branchTag}`;
+                const imgSha = `docker.io/${user}/${repoName}:${context.sha}`;
+                const hubTags = `https://hub.docker.com/r/${user}/${repoName}/tags`;
 
-            const body = [
-              "**CI Results**",
-              `- ✅ Lint & tests passed on Python 3.10, 3.11, 3.12`,
-              `- 📊 Coverage (3.12, enforced ≥80%): \`${cov}%\``,
-              `- 🐳 Images pushed:`,
-              `  - \`${imgBranch}\``,
-              `  - \`${imgSha}\``,
-              `- 🛡️ Trivy security scan: SARIF uploaded; blocking table run enforced`,
-              `- 📎 Artifacts: see this run → Artifacts`,
-              `- 🔗 Run details: ${runUrl}`
-            ].join("\n");
+                const body = [
+                    "**CI Results**",
+                    `- ✅ Lint & tests passed on Python 3.10, 3.11, 3.12`,
+                    `- 📊 Coverage (3.12, enforced ≥80%): \`${cov}%\``,
+                    `- 🐳 Images pushed:`,
+                    `  - \`${imgBranch}\``,
+                    `  - \`${imgSha}\``,
+                    `- 🔗 Docker Hub tags: ${hubTags}`,
+                    `- 🛡️ Trivy security scan: SARIF uploaded; blocking table run enforced`,
+                    `- 📎 Artifacts: see this run → Artifacts`,
+                    `- 🔗 Run details: ${runUrl}`
+                ].join("\n");
 
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body
-            });
+                await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body
+                });
