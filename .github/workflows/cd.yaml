@@ -1,0 +1,112 @@
+name: Python-Task (CD)
+
+on:
+  workflow_run:
+    workflows: ["Python-Task (CI)"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  deploy:
+    name: Pull image & mock deploy
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    env:
+      DH_USER:    ${{ secrets.DOCKERHUB_USERNAME }}
+      REPO_NAME:  ${{ github.event.repository.name }}
+      BRANCH:     ${{ github.event.workflow_run.head_branch }}
+      SHA:        ${{ github.event.workflow_run.head_sha }}
+
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull image (prefer :branch, fallback :sha)
+        id: pull
+        shell: bash
+        run: |
+          set +e
+          IMAGE_REPO="docker.io/${DH_USER}/${REPO_NAME}"
+
+          echo "Trying: ${IMAGE_REPO}:${BRANCH}"
+          if docker pull "${IMAGE_REPO}:${BRANCH}"; then
+            echo "tag=${BRANCH}"  >> "$GITHUB_OUTPUT"
+            echo "image=${IMAGE_REPO}:${BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Branch tag not found. Trying: ${IMAGE_REPO}:${SHA}"
+          if docker pull "${IMAGE_REPO}:${SHA}"; then
+            echo "tag=${SHA}" >> "$GITHUB_OUTPUT"
+            echo "image=${IMAGE_REPO}:${SHA}" >> "$GITHUB_OUTPUT"
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "status=failure" >> "$GITHUB_OUTPUT"
+          exit 1
+
+      - name: Run container (capture result)
+        id: run
+        if: ${{ steps.pull.outputs.status == 'success' }}
+        shell: bash
+        run: |
+          IMAGE="${{ steps.pull.outputs.image }}"
+          echo "Running: ${IMAGE} → python -m sample_app 2 3"
+          set +e
+          OUT=$(docker run --rm "${IMAGE}" python -m sample_app 2 3)
+          EC=$?
+          set -e
+          echo "out=${OUT}"      >> "$GITHUB_OUTPUT"
+          echo "exit=${EC}"      >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}"  >> "$GITHUB_OUTPUT"
+
+      - name: Assert success
+        if: ${{ steps.pull.outputs.status == 'success' }}
+        run: |
+          test "${{ steps.run.outputs.exit }}" -eq 0 || { echo "Container exited non-zero"; exit 1; }
+          test "${{ steps.run.outputs.out }}" = "5"  || { echo "Expected '5' got '${{ steps.run.outputs.out }}'"; exit 1; }
+
+      - name: Comment on PR (CD summary)
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          PULLED_IMAGE: ${{ steps.run.outputs.image || format('docker.io/{0}/{1}:{2}', env.DH_USER, env.REPO_NAME, env.BRANCH) }}
+          OUT:          ${{ steps.run.outputs.out }}
+          EXIT:         ${{ steps.run.outputs.exit }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const sha   = process.env.SHA;
+
+            // Find PR for this commit (if any)
+            const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({ owner, repo, commit_sha: sha });
+            const pr = prs.data[0]?.number;
+            if (!pr) { core.info("No PR found for this commit; skipping comment."); return; }
+
+            const pulled = "${{ steps.pull.outputs.status }}" === "success";
+            const img    = process.env.PULLED_IMAGE;
+            const out    = process.env.OUT ?? "";
+            const exit   = process.env.EXIT ?? "";
+            const ok     = pulled && exit === "0" && out === "5";
+            const emoji  = ok ? "✅" : "❌";
+
+            const lines = [
+              `**CD Result** ${emoji}`,
+              `- Image: \`${img}\``,
+              `- Pulled: \`${pulled ? "yes" : "no"}\``,
+              `- Command: \`python -m sample_app 2 3\``,
+              `- Output: \`${out || "(n/a)"}\``,
+              `- Exit code: \`${exit || "(n/a)"}\``,
+              `- Status: \`${ok ? "success" : "failure"}\``,
+            ];
+
+            await github.rest.issues.createComment({ owner, repo, issue_number: pr, body: lines.join("\n") });
