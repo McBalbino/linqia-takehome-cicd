@@ -81,15 +81,14 @@ jobs:
       - name: Parse coverage %
         id: cov
         run: |
-          RATE=$(python - <<'PY'
+            RATE=$(python - <<'PY'
             import xml.etree.ElementTree as ET
             t = ET.parse('coverage.xml')
             print(round(float(t.getroot().attrib.get('line-rate', 0.0))*100, 2))
-            )
             PY
-            
-          echo "pct=$RATE" >> "$GITHUB_OUTPUT"
-          echo "Coverage: ${RATE}%"
+            )
+            echo "pct=${RATE}" >> "$GITHUB_OUTPUT"
+            echo "Coverage: ${RATE}%"
 
       - name: Enforce coverage threshold (80%)
         run: |
