@@ -21,15 +21,13 @@ jobs:
       SHA:       ${{ github.event.workflow_run.head_sha }}
 
     steps:
-      # 1) Login to Docker Hub
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 2) Pull the image (prefer :branch, fallback :sha)
-      - name: Pull image
+      - name: Pull image (prefer :branch, fallback :sha)
         id: pull
         shell: bash
         run: |
@@ -53,7 +51,7 @@ jobs:
           fi
 
           echo "status=failure" >> "$GITHUB_OUTPUT"
-          exit 0  # keep job running so we can post a PR comment
+          exit 0  # keep job running so we can still post a PR comment
 
       - name: Run container (capture result)
         id: run
@@ -61,7 +59,7 @@ jobs:
         shell: bash
         run: |
           IMAGE="${{ steps.pull.outputs.image }}"
-          echo "Running: ${IMAGE} -> python -m sample_app 2 3 (via ENTRYPOINT+CMD and args)"
+          echo "Running: ${IMAGE}  (ENTRYPOINT: python -m sample_app)  ARGS: 2 3"
           set +e
           OUT=$(docker run --rm "${IMAGE}" 2 3)
           EC=$?
@@ -72,7 +70,6 @@ jobs:
           echo "Container output: ${OUT}"
           echo "Exit code: ${EC}"
 
-      # 4) Assert success (will fail the job if mock deploy failed)
       - name: Assert success
         if: ${{ steps.pull.outputs.status == 'success' }}
         shell: bash
@@ -80,7 +77,6 @@ jobs:
           test "${{ steps.run.outputs.exit }}" -eq 0 || { echo "Container exited non-zero"; exit 1; }
           test "${{ steps.run.outputs.out }}" = "5"  || { echo "Expected '5' got '${{ steps.run.outputs.out }}'"; exit 1; }
 
-      # 5) Comment on PR (always, if a PR exists)
       - name: Comment on PR (CD summary)
         if: always()
         uses: actions/github-script@v7
@@ -93,7 +89,7 @@ jobs:
             // Find PR for this commit (if any)
             const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({ owner, repo, commit_sha: sha });
             const pr = prs.data[0]?.number;
-            if (!pr) { core.info("No PR found for this commit; skipping comment."); return; }
+            if (!pr) { core.info("No PR for this commit; skipping comment."); return; }
 
             const pulled   = "${{ steps.pull.outputs.status }}" === "success";
             const image    = "${{ steps.pull.outputs.image || '' }}";
@@ -102,16 +98,14 @@ jobs:
             const ok = pulled && exitCode === "0" && out === "5";
             const emoji = ok ? "✅" : "❌";
 
-            const lines = [
+            const body = [
               `**CD Result** ${emoji}`,
               `- Image: \`${image || `docker.io/${process.env.DH_USER}/${process.env.REPO_NAME}:${process.env.BRANCH}`}\``,
               `- Pulled: \`${pulled ? "yes" : "no"}\``,
-              `- Command: \`python -m sample_app 2 3\``,
+              `- Command: \`ENTRYPOINT python -m sample_app\` + args \`2 3\``,
               `- Output: \`${out || "(n/a)"}\``,
               `- Exit code: \`${exitCode || "(n/a)"}\``,
               `- Status: \`${ok ? "success" : "failure"}\``,
-            ];
+            ].join("\n");
 
-            await github.rest.issues.createComment({
-              owner, repo, issue_number: pr, body: lines.join("\n")
-            });
+            await github.rest.issues.createComment({ owner, repo, issue_number: pr, body });

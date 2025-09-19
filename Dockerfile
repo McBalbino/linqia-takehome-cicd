@@ -1,3 +1,4 @@
+# Lightweight base
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -5,11 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt || true
+# Install runtime deps (ok if file is empty / comments only)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY sample_app /app/sample_app
+# Copy app
+COPY sample_app ./sample_app
 
-# Default: run the module. 
-ENTRYPOINT ["python"]
-CMD ["-m", "sample_app"]
+# Run the CLI module by default; any args passed to `docker run` will be appended
+ENTRYPOINT ["python", "-m", "sample_app"]
